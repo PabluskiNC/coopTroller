@@ -5,7 +5,7 @@ This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 */
 
 #include <Arduino.h>
-#include <pins_arduino.h>
+//#include <pins_arduino.h>
 #include "options.h"
 #include <FS.h>                   //this needs to be first, or it all crashes and burns...
 #include <Wire.h>                 // https://www.arduino.cc/en/Reference/Wire
@@ -18,14 +18,14 @@ This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>         // https://github.com/knolleary/pubsubclient
 #include <Bounce2.h>              // https://github.com/thomasfredericks/Bounce2
-#include <RTClib.h>               // https://github.com/adafruit/RTClib
+#include <RTClib.h>               // fork of https://github.com/adafruit/RTClib with getTemperature function added
 #ifdef LCD_DISPLAY
   #include <LiquidCrystal_I2C.h>
 #endif
 #include <ArduinoJson.h>          // https://github.com/bblanchon/ArduinoJson
 #include "pins.h"                 // holds pin definitions
 
-#define CoopTrollerVersion "3.04f"
+#define CoopTrollerVersion "3.04h"
 
 // MQTT Subscription Channels
 #define sTime    "time/beacon"
@@ -52,7 +52,7 @@ const unsigned long lcdUpdateRate   =     5000; // LCD update rate (5 seconds)
 
 // Night time lockout to prevent reaction to light sensor readings if an exterior light source causes
 // a reading otherwise bright enough to activate the interior light and/or door.
-const boolean       nightLock      =      false; // Enable night time lockout
+const boolean       nightLock      =      true; // Enable night time lockout
 
 /*************************************************
        DO   NOT   EDIT   BELOW   THIS   LINE
@@ -69,7 +69,7 @@ unsigned long motorRunning       =      0;  // how long has the motor been on
 unsigned long motorTimeOut       = 300000;  // Time to wait before running motor again (5 minutes)
 unsigned long lastMotorRun       =      0;  // last time the motor was activated
 unsigned long lastLcdUpdate      =      0;  // last time LCD was updated
-String        doorState          =     "Uninitialzed"; // Values will be one of: closed, closing, open, opening, unknown
+String        doorState          =  "Uninitialzed"; // Values will be one of: closed, closing, open, opening, unknown
 String        doorStatePrev      =     "";
 int           brightness         =      0;
 int           openBright         =     40; // brightness to wait until opening the door
@@ -82,6 +82,7 @@ int           doorBottomVal      =      0;
 int           doorBottomVal2     =      0;
 int           doorBottomState    =      0;
 int           doorBottomPrev     =      0;
+float         tempC              =      0;  // temperature
 //uint32_t      bootTime           =      0;
 char          mqtt_msg_buf[100];   // Max MQTT incoming message size
 DateTime      now;
@@ -117,7 +118,6 @@ PubSubClient mqtt(espClient);
 // Setup switch debounce software
 Bounce debounceTop = Bounce();
 Bounce debounceBot = Bounce();
-
 
 /**
  * WiFi Manager callback notifying us of the need to save config
@@ -169,13 +169,13 @@ int jstatusSend() {
    JsonArray& mqttRoot  = jsonBuffer.createArray();
    JsonObject& mqttJson = mqttRoot.createNestedObject();
    mqttJson["ID"]       = mClientID;
-   mqttJson["tstamp"]   = now.secondstime();
+   mqttJson["tstamp"]   = now.unixtime();
    JsonObject& data     = mqttJson.createNestedObject("data");
    data["Br"]           = brightness;
    data["Dr"]           = doorState;
    data["Tp"]           = doorTopState;
    data["Bt"]           = doorBottomState;
-   data["TC"]           = RTC.getTemperature();
+   data["TC"]           = tempC;
 
    mqttJson.printTo(buf,sizeof(buf));
    if (Debugging) {
@@ -293,10 +293,12 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       if (doorState == "open") {
         doorState = "closing";
         remoteLockStart = millis();
+        mqtt.publish(pStatus, "remotetrigger|door closing");
       }
       else if (doorState == "closed") {
         doorState = "opening";
         remoteLockStart = millis();
+        mqtt.publish(pStatus, "remotetrigger|door opening");
       }
     }
   }
@@ -308,6 +310,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       Serial.print("Night lock end updated to: ");
       Serial.println(nightLockEnd);
     }
+    mqtt.publish(pStatus, "sunrise");
   }
 
   if (strcmp(topic,sSunSet)==0) {
@@ -316,12 +319,14 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
       Serial.print("Night lock start updated to: ");
       Serial.println(nightLockStart);
     }
+    mqtt.publish(pStatus, "sunset");
   }
 
   // Sync RTC to time beacon once/day
   if (strcmp(topic,sTime)==0) {
     if (lastRTCSync == 0 || ((unsigned long)(millis() - lastRTCSync) > millisPerDay)) {
       RTC.adjust(strtoul(data.c_str(), NULL, 0));
+      mqtt.publish(pStatus, "time beacon");
       lastRTCSync = millis();
       if (Debugging) {
         now = RTC.now();
@@ -375,7 +380,7 @@ void doorMove() {
         }
 
         if (doorStatePrev != doorState && wifiConnected) {
-          mqtt.publish(pStatus, "door|runaway");
+          mqtt.publish(pStatus, "door|halted");
         }
         //motorHalted = 1;
         doorState="halted";
@@ -452,14 +457,9 @@ void readSensors() {
     brightness = constrain(brightness, 0, 100);     // constrain value to 0-100 scale
     lastLightRead = millis();
 
-    /*
-    char buf[100];
-    String pubString = String(brightness);
-    pubString.toCharArray(buf, pubString.length()+1);
-    if (wifiConnected) {
-       mqtt.publish(pLight, buf);
-    }
-    */
+    tempC=RTC.getTemperature(); // get the temperature from the RTC chip
+
+    // Send status msg
     jstatusSend();
     if (Debugging) {
         Serial.print("MQTT State: ");
@@ -549,40 +549,44 @@ int stringToNumber(String thisString) {
 }
 
 #ifdef LCD_DISPLAY
-void lcdUpdate(){
+void lcdUpdate() {
   //            1111111111
   //  01234567890123456789
   // +--------------------+
-  // |IP:xxx.xxx.xxx.xxx  | 0
-  // |T:xxxx B:xxx        | 1
-  // |D:xxxxxxxx L:x      | 2
+  // |I:xxx.xxx.xxx.xxx   | 0
+  // |T:xx.xx B:xxx C:xx  | 1
+  // |D:xxxxxxxx L:xx-xx  | 2
   // |MQ:xx T:x B:x       | 3
   // +--------------------+
 
   if (lastLcdUpdate == 0 || (unsigned long)millis() - lastLcdUpdate > lcdUpdateRate) {
     lastLcdUpdate = millis();
-    lcd.setCursor(0,0);
-    int a1 = WiFi.localIP()[0];
-    int a2 = WiFi.localIP()[1];
-    int a3 = WiFi.localIP()[2];
-    int a4 = WiFi.localIP()[3];
-    snprintf(lcd_buf,20,"I:%03i.%03i.%03i.%03i  ",a1,a2,a3,a4);
-    lcd.print(lcd_buf);
-    lcd.setCursor(0,1);
-    now = RTC.now();
-    snprintf(lcd_buf,20,"T:%02d%02d B:%03d",now.hour(),now.minute(),brightness);
-    lcd.print(lcd_buf);
-    lcd.setCursor(0,2);
-    String RLS;
-    RLS = "N";
-    if(remoteLockStart>0) {
-      RLS = "Y";
+    if (wifiConnected) {
+      int a1 = WiFi.localIP()[0];
+      int a2 = WiFi.localIP()[1];
+      int a3 = WiFi.localIP()[2];
+      int a4 = WiFi.localIP()[3];
+      snprintf(lcd_buf,21,"I:%03i.%03i.%03i.%03i  ",a1,a2,a3,a4);
+    } else {
+      snprintf(lcd_buf,21,"I:Wifi Unconnected  ");
     }
-    snprintf(lcd_buf,20,"D:%-8s L:%1s",doorState.c_str(),RLS.c_str());
+    lcd.setCursor(0,0);
     lcd.print(lcd_buf);
-    lcd.setCursor(0,3);
+    now = RTC.now();
+    snprintf(lcd_buf,21,"T:%02d.%02d B:%03d C:%02i",now.hour(),now.minute(),brightness,int(tempC));
+    lcd.setCursor(0,1);
+    lcd.print(lcd_buf);
+    String NLS;
+    NLS = "N";
+    if(nightLock) {
+      NLS = String(nightLockStart)+"-"+String(nightLockEnd);
+    }
+    snprintf(lcd_buf,21,"D:%-8s L:%1s",doorState.c_str(),NLS.c_str());
+    lcd.setCursor(0,2);
+    lcd.print(lcd_buf);
     int mqs = mqtt.state();
-    snprintf(lcd_buf,20,"MQ:%02i T:%1i B:%1i   ",mqs,doorTopState,doorBottomState);
+    snprintf(lcd_buf,21,"MQ:%02i T:%1i B:%1i   ",mqs,doorTopState,doorBottomState);
+    lcd.setCursor(0,3);
     lcd.print(lcd_buf);
   }
 }
@@ -742,18 +746,20 @@ void setup() {
   // Get the RTC going
   Wire.begin(i2cSDA,i2cSCL);
   #ifdef LCD_DISPLAY
+  char lcd_buf[21];
   lcd.init();
-  delay(500);
-  lcd.init();
-  lcd.backlight();
+  lcd.backlight();  // backlight on
   lcd.print("CoopTroller   ");
   lcd.print(CoopTrollerVersion);
   lcd.setCursor(0,1);
   lcd.print("2016 - Pablo Sanchez");
   lcd.setCursor(0,2);
-  lcd.print("Compiled on:");
-  lcd.setCursor(0,3);
   DateTime now = DateTime(__DATE__,__TIME__);
+  snprintf(lcd_buf,21,"Comp:%02i/%02i/%2i %02i:%02i",now.month(),now.day(),(now.year()-2000),now.hour(),now.minute());
+  lcd.print(lcd_buf);
+  lcd.setCursor(0,3);
+  lcd.print("");
+  /*
   lcd.print(now.day(), DEC);
   lcd.print('/');
   lcd.print(now.month(), DEC);
@@ -771,15 +777,22 @@ void setup() {
   if (now.second()<10)
     lcd.print('0');
   lcd.print(now.second(), DEC);
-  delay(7000);
-  lcd.init();
+  */
+  //lcd.init();
   #endif
 
   // Set the outputs
   if (! RTC.begin()) {
+    #ifdef LCD_DISPLAY
+    lcd.setCursor(0,3);
+    lcd.print("RTC not found! Halting.");
+    #endif
     Serial.println("Couldn't find RTC");
     while (1);
   }
+  #ifdef LCD_DISPLAY
+  delay(7000);
+  #endif
   /* RTC_DS1307
   if (! RTC.isrunning() ) {
     //clockmode = NOT_SET;
@@ -798,10 +811,6 @@ void setup() {
     Serial.println("ARDUINO: Setup WIFI");
   }
 
-  // Wifi Connect
-  //WiFi.disconnect();
-
-  //delay(200);
   WiFiConfig(0);
 
   //WiFi.begin(wHost, wPass);
@@ -829,10 +838,12 @@ void setup() {
     }
   } else {
     wifiConnected = false;
+    /*
     #ifdef LCD_DISPLAY
     lcd.clear();
     lcd.print("No WiFi");
     #endif
+    */
     if (Debugging) {
        Serial.println("");
        Serial.println("WiFi UNconnected");
