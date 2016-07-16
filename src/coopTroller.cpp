@@ -1,6 +1,7 @@
 /*
 Arduino Chicken Coop Controller
 Based loosely on code by Will Vincent <will@willvincent.com>
+https://github.com/willvincent/chicken-coop
 This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 */
 
@@ -25,7 +26,7 @@ This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 #include <ArduinoJson.h>          // https://github.com/bblanchon/ArduinoJson
 #include "pins.h"                 // holds pin definitions
 
-#define CoopTrollerVersion "3.04h"
+#define CoopTrollerVersion "3.04i"
 
 // MQTT Subscription Channels
 #define sTime    "time/beacon"
@@ -368,7 +369,7 @@ void mqttData(char* topic, byte* payload, unsigned int plen) {
  */
 void doorMove() {
 
-  if (doorState != "halted" ) {
+  if (doorState != "halted" and doorState != "broken") {
     if(motorRunning > 0) {
 
       if (motorRunning + maxMotorOn < millis()){
@@ -573,7 +574,7 @@ void lcdUpdate() {
     lcd.setCursor(0,0);
     lcd.print(lcd_buf);
     now = RTC.now();
-    snprintf(lcd_buf,21,"T:%02d.%02d B:%03d C:%02i",now.hour(),now.minute(),brightness,int(tempC));
+    snprintf(lcd_buf,21,"T:%02d.%02d B:%03d C:%02i   ",now.hour(),now.minute(),brightness,int(tempC));
     lcd.setCursor(0,1);
     lcd.print(lcd_buf);
     String NLS;
@@ -581,11 +582,11 @@ void lcdUpdate() {
     if(nightLock) {
       NLS = String(nightLockStart)+"-"+String(nightLockEnd);
     }
-    snprintf(lcd_buf,21,"D:%-8s L:%1s",doorState.c_str(),NLS.c_str());
+    snprintf(lcd_buf,21,"D:%-8s L:%5s  ",doorState.c_str(),NLS.c_str());
     lcd.setCursor(0,2);
     lcd.print(lcd_buf);
     int mqs = mqtt.state();
-    snprintf(lcd_buf,21,"MQ:%02i T:%1i B:%1i   ",mqs,doorTopState,doorBottomState);
+    snprintf(lcd_buf,21,"MQ:%02i T:%1i B:%1i       ",mqs,doorTopState,doorBottomState);
     lcd.setCursor(0,3);
     lcd.print(lcd_buf);
   }
@@ -899,11 +900,7 @@ void setup() {
        lcdUpdate();
        #endif
        if (wifiConnected) {
-          mqtt.publish(pStatus,"door|insane");
-       }
-       // Goto to the corner and stay there
-       while(1){
-        yield();
+          mqtt.publish(pStatus,"door|broken");
        }
        break;
     case 1:
@@ -1009,6 +1006,15 @@ void loop() {
   debounceBot.update();
   doorBottomState = debounceBot.read();
 
+  if (doorTopState + doorBottomState == 0) {
+    doorState = "broken";
+    if (wifiConnected) {
+       mqtt.publish(pStatus,"door|broken");
+       if (Debugging) {
+         Serial.println("Door Broken");
+       }
+    }
+  }
   // Read new data from sensors
   //if (Debugging) {
   //  Serial.println("Read Sensors");
