@@ -26,7 +26,7 @@ This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 #include <ArduinoJson.h>          // https://github.com/bblanchon/ArduinoJson
 #include "pins.h"                 // holds pin definitions
 
-#define CoopTrollerVersion "3.04i"
+#define CoopTrollerVersion "3.04j"
 
 // MQTT Subscription Channels
 #define sTime    "time/beacon"
@@ -1013,6 +1013,14 @@ void loop() {
        if (Debugging) {
          Serial.println("Door Broken");
        }
+    }
+  } else {
+    if (doorState == "broken") { // So...It's not broken anymore ...
+      if(doorTopState== 0) {
+        doorState="open";
+      } else {
+        doorState="closed";
+      }
     }
   }
   // Read new data from sensors
