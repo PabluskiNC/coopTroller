@@ -26,7 +26,7 @@ This Sketch is designed to work on a ESP-8266 MUANODE 0.9 board
 #include <ArduinoJson.h>          // https://github.com/bblanchon/ArduinoJson
 #include "pins.h"                 // holds pin definitions
 
-#define CoopTrollerVersion "3.04j"
+#define CoopTrollerVersion "3.04k"
 
 // MQTT Subscription Channels
 #define sTime    "time/beacon"
@@ -74,7 +74,7 @@ String        doorState          =  "Uninitialzed"; // Values will be one of: cl
 String        doorStatePrev      =     "";
 int           brightness         =      0;
 int           openBright         =     40; // brightness to wait until opening the door
-int           closeBright        =     25; // brightness to wait until closing the door
+int           closeBright        =      5; // brightness to wait until closing the door
 int           doorTopVal         =      0;
 int           doorTopVal2        =      0;
 int           doorTopState       =      0;
@@ -222,8 +222,8 @@ void mqttSubscribe() {
 void mqttData(char* topic, byte* payload, unsigned int plen) {
 
   // Copy the payload to the MQTT message buffer
-  if( plen > sizeof(mqtt_msg_buf)) {  // buffer is only 100 bytes long
-    plen = sizeof(mqtt_msg_buf);
+  if( plen >= sizeof(mqtt_msg_buf)) {  // buffer is only 100 bytes long
+    plen = sizeof(mqtt_msg_buf)-1;
   }
   memset(mqtt_msg_buf,'\0',plen+1);
   memcpy(mqtt_msg_buf,payload,plen);
@@ -665,48 +665,51 @@ void WiFiConfig(int reset_config) {
   //sets timeout until configuration portal gets turned off
   //useful to make it all retry or go to sleep
   //in seconds
-  //wifiManager.setTimeout(120);
+  wifiManager.setTimeout(120);  // Timeout in case we can't get wifi
 
   //fetches ssid and pass and tries to connect
   //if it does not connect it starts an access point with the specified name
   //here  "AutoConnectAP"
   //and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect("AutoConnectAP", "password")) {
-    Serial.println("failed to connect and hit timeout");
-    delay(3000);
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(5000);
+  int retryCount = 3;
+  while (retryCount > 0) {
+    retryCount--;
+    if (!wifiManager.autoConnect("AutoConnectAP", "password")) {
+      Serial.println("failed to connect and hit timeout");
+      delay(3000);
+    } else {
+      retryCount = -99;
+    }
   }
-
-  //if you get here you have connected to the WiFi
-  Serial.println("connected...yeey :)");
+  if (retryCount == -99) {  //if you get here you have connected to the WiFi
+     Serial.println("connected...yeey :)");
 
   //read updated parameters
-  strcpy(mqtt_server, custom_mqtt_server.getValue());
-  strcpy(mqtt_port, custom_mqtt_port.getValue());
+     strcpy(mqtt_server, custom_mqtt_server.getValue());
+     strcpy(mqtt_port, custom_mqtt_port.getValue());
 
   //save the custom parameters to FS
-  if (shouldSaveConfig) {
-    Serial.println("saving config");
-    DynamicJsonBuffer jsonBuffer;
-    JsonObject& json = jsonBuffer.createObject();
-    json["mqtt_server"] = mqtt_server;
-    json["mqtt_port"] = mqtt_port;
+     if (shouldSaveConfig) {
+        Serial.println("saving config");
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.createObject();
+        json["mqtt_server"] = mqtt_server;
+        json["mqtt_port"] = mqtt_port;
 
-    File configFile = SPIFFS.open("/config.json", "w");
-    if (!configFile) {
-      Serial.println("failed to open config file for writing");
-    }
+        File configFile = SPIFFS.open("/config.json", "w");
+        if (!configFile) {
+           Serial.println("failed to open config file for writing");
+        }
 
-    json.printTo(Serial);
-    json.printTo(configFile);
-    configFile.close();
+        json.printTo(Serial);
+        json.printTo(configFile);
+        configFile.close();
     //end save
-  }
+      }
 
-  Serial.println("local ip");
-  Serial.println(WiFi.localIP());
+      Serial.println("local ip");
+      Serial.println(WiFi.localIP());
+   }
 }
 /**
  * Initialization on startup.
@@ -760,26 +763,7 @@ void setup() {
   lcd.print(lcd_buf);
   lcd.setCursor(0,3);
   lcd.print("");
-  /*
-  lcd.print(now.day(), DEC);
-  lcd.print('/');
-  lcd.print(now.month(), DEC);
-  lcd.print('/');
-  lcd.print(now.year(), DEC);
-  lcd.print(' ');
-  if (now.hour()<10)
-    lcd.print('0');
-  lcd.print(now.hour(), DEC);
-  lcd.print(':');
-  if (now.minute()<10)
-    lcd.print('0');
-  lcd.print(now.minute(), DEC);
-  lcd.print(':');
-  if (now.second()<10)
-    lcd.print('0');
-  lcd.print(now.second(), DEC);
-  */
-  //lcd.init();
+
   #endif
 
   // Set the outputs
@@ -794,15 +778,7 @@ void setup() {
   #ifdef LCD_DISPLAY
   delay(7000);
   #endif
-  /* RTC_DS1307
-  if (! RTC.isrunning() ) {
-    //clockmode = NOT_SET;
-    if (Debugging) {
-       Serial.println("RTC is not running");
-    }
-    RTC.adjust(DateTime(__DATE__, __TIME__));  // try kick starting the clock with the compile time
-  }
-  */
+
   if (Debugging) {
     now = RTC.now();
     Serial.printf("RTC time is: %0d:%0d\n",now.hour(),now.minute());
